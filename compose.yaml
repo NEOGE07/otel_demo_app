@@ -23,6 +23,11 @@ networks:
     name: opentelemetry-demo
     driver: bridge
 
+
+  elastic-backend:
+    external: true
+    name: elastic-otel_observability
+
 services:
   # ******************
   # Core Demo Services
@@ -876,3 +881,6 @@ services:
       - POSTGRES_PORT
       - POSTGRES_MONITORING_PASSWORD
       - GOMEMLIMIT=160MiB
+    networks:
+      - default
+      - elastic-backend

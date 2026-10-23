@@ -31,3 +31,19 @@
 #       exporters: [otlp_http/prometheus, debug, otlp_grpc/mybackend]           # repeat upstream exporters
 #     logs:
 #       exporters: [opensearch, debug, otlp_grpc/mybackend]                     # repeat upstream exporters
+
+# Custom exporter for the existing Elasticsearch backend.
+# The exporter uses OTel-native mapping by default.
+
+#exporters:
+#  elasticsearch:
+#    endpoint: http://elasticsearch:9200
+
+#service:
+#  pipelines:
+#    traces:
+#      exporters: [debug, span_metrics, elasticsearch]
+#    metrics:
+#      exporters: [debug, elasticsearch]
+#    logs:
+#      exporters: [debug, elasticsearch]
