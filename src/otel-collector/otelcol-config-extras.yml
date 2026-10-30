@@ -1,5 +1,10 @@
+
 # Copyright The OpenTelemetry Authors
 # SPDX-License-Identifier: Apache-2.0
+
+# ============================================================
+# EXPORTERS
+# ============================================================
 
 exporters:
   elasticsearch:
@@ -29,11 +34,85 @@ exporters:
     sending_queue:
       batch:
 
+# ============================================================
+# CONNECTORS
+# ============================================================
+
+connectors:
+  signal_to_metrics:
+    error_mode: ignore
+
+    logs:
+      # ------------------------------------------------------
+      # METRIC 1: Count HTTP requests by status and context
+      # ------------------------------------------------------
+
+      - name: app.http.requests
+        description: "Count HTTP requests by status code, user and operation"
+        unit: "{request}"
+
+        conditions:
+          - 'log.attributes["http.response.status_code"] != nil'
+
+        attributes:
+          - key: http.response.status_code
+          - key: user.id
+            optional: true
+          - key: app.operation
+            optional: true
+
+        sum:
+          value: "1"
+          monotonic: true
+
+# ============================================================
+# PIPELINES
+# ============================================================
+
 service:
   pipelines:
+
+    # --------------------------------------------------------
+    # TRACES
+    # --------------------------------------------------------
+
     traces:
-      exporters: [debug, otlp_grpc/jaeger, span_metrics, elasticsearch]
+      exporters:
+        - debug
+        - otlp_grpc/jaeger
+        - span_metrics
+        - elasticsearch
+
+    # --------------------------------------------------------
+    # METRICS
+    # --------------------------------------------------------
+
     metrics:
-      exporters: [debug, otlp_http/prometheus, elasticsearch]
+      receivers:
+        - docker_stats
+        - http_check/frontend-proxy
+        - host_metrics
+        - nginx
+        - otlp
+        - redis
+        - postgresql
+        - prometheus/ad
+        - span_metrics
+        - signal_to_metrics
+
+      exporters:
+        - debug
+        - otlp_http/prometheus
+        - elasticsearch
+
+    # --------------------------------------------------------
+    # LOGS
+    # --------------------------------------------------------
+
     logs:
-      exporters: [debug, opensearch, elasticsearch]
+      exporters:
+        - debug
+        - opensearch
+        - elasticsearch
+        - signal_to_metrics
+
