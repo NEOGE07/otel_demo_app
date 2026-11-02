@@ -1,38 +1,52 @@
 
-# Copyright The OpenTelemetry Authors
-# SPDX-License-Identifier: Apache-2.0
-
 # ============================================================
 # EXPORTERS
 # ============================================================
 
 exporters:
+  # Elasticsearch
   elasticsearch:
     endpoint: http://elasticsearch:9200
 
+  # Jaeger
   otlp_grpc/jaeger:
-    endpoint: "jaeger:4317"
+    endpoint: jaeger:4317
     tls:
       insecure: true
     sending_queue:
-      batch:
+      batch: {}
 
+  # Prometheus OTLP HTTP receiver
   otlp_http/prometheus:
-    endpoint: "http://prometheus:9090/api/v1/otlp"
+    endpoint: http://prometheus:9090/api/v1/otlp
     tls:
       insecure: true
     sending_queue:
-      batch:
+      batch: {}
 
+  # OpenSearch logs
   opensearch:
     logs_index: otel-logs
     logs_index_time_format: "yyyy-MM-dd"
     http:
-      endpoint: "http://opensearch:9200"
+      endpoint: http://opensearch:9200
       tls:
         insecure: true
     sending_queue:
-      batch:
+      batch: {}
+
+
+# ============================================================
+# PROCESSORS
+# ============================================================
+
+processors:
+  # Converts delta-temporality metrics into cumulative metrics.
+  # This processor is used only in the log-derived metrics
+  # pipeline defined below.
+  delta_to_cumulative:
+    max_stale: 5m
+
 
 # ============================================================
 # CONNECTORS
@@ -43,10 +57,6 @@ connectors:
     error_mode: ignore
 
     logs:
-      # ------------------------------------------------------
-      # METRIC 1: Count HTTP requests by status and context
-      # ------------------------------------------------------
-
       - name: app.http.requests
         description: "Count HTTP requests by status code, user and operation"
         unit: "{request}"
@@ -56,8 +66,10 @@ connectors:
 
         attributes:
           - key: http.response.status_code
+
           - key: user.id
             optional: true
+
           - key: app.operation
             optional: true
 
@@ -65,8 +77,9 @@ connectors:
           value: "1"
           monotonic: true
 
+
 # ============================================================
-# PIPELINES
+# SERVICE PIPELINES
 # ============================================================
 
 service:
@@ -77,14 +90,26 @@ service:
     # --------------------------------------------------------
 
     traces:
+      receivers:
+        - otlp
+
+      processors:
+        - resource_detection
+        - memory_limiter
+        - transform/sanitize_spans
+        - gen_ai_normalizer
+        - transform/redact_sensitive_data
+        - redaction
+
       exporters:
         - debug
         - otlp_grpc/jaeger
         - span_metrics
         - elasticsearch
 
+
     # --------------------------------------------------------
-    # METRICS
+    # EXISTING METRICS
     # --------------------------------------------------------
 
     metrics:
@@ -98,18 +123,50 @@ service:
         - postgresql
         - prometheus/ad
         - span_metrics
-        - signal_to_metrics
+
+      processors:
+        - resource_detection
+        - memory_limiter
 
       exporters:
         - debug
         - otlp_http/prometheus
         - elasticsearch
 
+
+    # --------------------------------------------------------
+    # LOG-DERIVED METRICS
+    # --------------------------------------------------------
+
+    metrics/log-derived:
+      receivers:
+        - signal_to_metrics
+
+      processors:
+        - resource_detection
+        - memory_limiter
+        - delta_to_cumulative
+
+      exporters:
+        - debug
+        - otlp_http/prometheus
+        - elasticsearch
+
+
     # --------------------------------------------------------
     # LOGS
     # --------------------------------------------------------
 
     logs:
+      receivers:
+        - otlp
+        - postgresql
+
+      processors:
+        - resource_detection
+        - memory_limiter
+        - transform/sanitize_logs
+
       exporters:
         - debug
         - opensearch
