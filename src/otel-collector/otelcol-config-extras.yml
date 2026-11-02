@@ -4,27 +4,38 @@
 # ============================================================
 
 exporters:
-  # Elasticsearch
+
+  # Primary observability backend
   elasticsearch:
     endpoint: http://elasticsearch:9200
+    timeout: 30s
 
-  # Jaeger
+    sending_queue:
+      enabled: true
+      num_consumers: 10
+      queue_size: 1000
+
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 30s
+      max_elapsed_time: 300s
+
+  # Jaeger - secondary trace backend
   otlp_grpc/jaeger:
     endpoint: jaeger:4317
     tls:
       insecure: true
     sending_queue:
-      batch: {}
+      enabled: true
 
   # Prometheus OTLP HTTP receiver
   otlp_http/prometheus:
     endpoint: http://prometheus:9090/api/v1/otlp
     tls:
       insecure: true
-    sending_queue:
-      batch: {}
 
-  # OpenSearch logs
+  # OpenSearch - optional secondary log backend
   opensearch:
     logs_index: otel-logs
     logs_index_time_format: "yyyy-MM-dd"
@@ -32,8 +43,6 @@ exporters:
       endpoint: http://opensearch:9200
       tls:
         insecure: true
-    sending_queue:
-      batch: {}
 
 
 # ============================================================
@@ -41,11 +50,17 @@ exporters:
 # ============================================================
 
 processors:
-  # Converts delta-temporality metrics into cumulative metrics.
-  # This processor is used only in the log-derived metrics
-  # pipeline defined below.
-  delta_to_cumulative:
-    max_stale: 5m
+
+  # Resource and memory management
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 25
+
+  # Convert cumulative metrics into delta metrics.
+  # Required for Elasticsearch histogram compatibility.
+  cumulativetodelta:
+    max_staleness: 5m
 
 
 # ============================================================
@@ -53,25 +68,30 @@ processors:
 # ============================================================
 
 connectors:
+
+  # ----------------------------------------------------------
+  # LOGS -> METRICS
+  # ----------------------------------------------------------
+
   signal_to_metrics:
     error_mode: ignore
 
     logs:
       - name: app.http.requests
-        description: "Count HTTP requests by status code, user and operation"
+        description: "Count HTTP requests by service and status code"
         unit: "{request}"
 
         conditions:
-          - 'log.attributes["http.response.status_code"] != nil'
+          - 'log.attributes["http.response.status_code"] != nil and resource.attributes["service.name"] != nil'
 
         attributes:
           - key: http.response.status_code
 
-          - key: user.id
-            optional: true
-
           - key: app.operation
             optional: true
+
+        include_resource_attributes:
+          - key: resource.service.name
 
         sum:
           value: "1"
@@ -109,7 +129,8 @@ service:
 
 
     # --------------------------------------------------------
-    # EXISTING METRICS
+    # METRICS -> PROMETHEUS
+    # Original metric temporality preserved
     # --------------------------------------------------------
 
     metrics:
@@ -131,11 +152,36 @@ service:
       exporters:
         - debug
         - otlp_http/prometheus
+
+
+    # --------------------------------------------------------
+    # METRICS -> ELASTICSEARCH
+    # Cumulative -> Delta conversion
+    # --------------------------------------------------------
+
+    metrics/elasticsearch:
+      receivers:
+        - docker_stats
+        - http_check/frontend-proxy
+        - host_metrics
+        - nginx
+        - otlp
+        - redis
+        - postgresql
+        - prometheus/ad
+        - span_metrics
+
+      processors:
+        - resource_detection
+        - memory_limiter
+        - cumulativetodelta
+
+      exporters:
         - elasticsearch
 
 
     # --------------------------------------------------------
-    # LOG-DERIVED METRICS
+    # LOG-DERIVED METRICS -> PROMETHEUS
     # --------------------------------------------------------
 
     metrics/log-derived:
@@ -145,11 +191,26 @@ service:
       processors:
         - resource_detection
         - memory_limiter
-        - delta_to_cumulative
 
       exporters:
         - debug
         - otlp_http/prometheus
+
+
+    # --------------------------------------------------------
+    # LOG-DERIVED METRICS -> ELASTICSEARCH
+    # --------------------------------------------------------
+
+    metrics/log-derived/elasticsearch:
+      receivers:
+        - signal_to_metrics
+
+      processors:
+        - resource_detection
+        - memory_limiter
+        - cumulativetodelta
+
+      exporters:
         - elasticsearch
 
 
