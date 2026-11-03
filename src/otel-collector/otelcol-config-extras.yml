@@ -61,6 +61,14 @@ processors:
   # Required for Elasticsearch histogram compatibility.
   cumulativetodelta:
     max_staleness: 5m
+    
+  # Copy service.name from metric resource attributes
+  # into metric datapoint attributes.
+  transform/add_service_name_to_metrics:
+    metric_statements:
+      - context: datapoint
+        statements:
+          - set(attributes["service.name"], resource.attributes["service.name"]) where resource.attributes["service.name"] != nil
 
 
 # ============================================================
@@ -86,12 +94,14 @@ connectors:
 
         attributes:
           - key: http.response.status_code
-
+          #- key: service.name
+          
+          
           - key: app.operation
             optional: true
 
         include_resource_attributes:
-          - key: resource.service.name
+          - key: service.name
 
         sum:
           value: "1"
@@ -148,6 +158,8 @@ service:
       processors:
         - resource_detection
         - memory_limiter
+        - transform/add_service_name_to_metrics
+
 
       exporters:
         - debug
@@ -175,6 +187,8 @@ service:
         - resource_detection
         - memory_limiter
         - cumulativetodelta
+        - transform/add_service_name_to_metrics
+
 
       exporters:
         - elasticsearch
@@ -191,6 +205,7 @@ service:
       processors:
         - resource_detection
         - memory_limiter
+        - transform/add_service_name_to_metrics
 
       exporters:
         - debug
@@ -209,6 +224,7 @@ service:
         - resource_detection
         - memory_limiter
         - cumulativetodelta
+        - transform/add_service_name_to_metrics
 
       exporters:
         - elasticsearch
