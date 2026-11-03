@@ -69,6 +69,11 @@ processors:
       - context: datapoint
         statements:
           - set(attributes["service.name"], resource.attributes["service.name"]) where resource.attributes["service.name"] != nil
+          
+      # Remove service.name from resource attributes
+      - context: resource
+        statements:
+          - delete_key(attributes, "service.name")    
 
 
 # ============================================================
@@ -89,9 +94,12 @@ connectors:
         description: "Count HTTP requests by service and status code"
         unit: "{request}"
 
+        # Specifies the conditions of logs to perform conversion
         conditions:
           - 'log.attributes["http.response.status_code"] != nil and resource.attributes["service.name"] != nil'
 
+
+        # Specifies attributes to perform conversion on
         attributes:
           - key: http.response.status_code
           #- key: service.name
