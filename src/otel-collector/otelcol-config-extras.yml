@@ -69,11 +69,7 @@ processors:
 
   # Delta-to-cumulative processor
   # Accumulates incoming delta Sum metrics in memory.
-  #
-  # max_stale: Retain inactive metric streams for up to 10 years.
-  # max_streams: Limit the number of tracked metric streams.
-  #
-  # NOTE: State is lost when the Collector restarts.
+  # State is lost when the Collector restarts.
   deltatocumulative:
     max_stale: 87600h
     max_streams: 100
@@ -98,19 +94,7 @@ processors:
 connectors:
 
   # ==========================================================
-  # 1. AGGREGATE HTTP REQUEST METRICS
-  # ==========================================================
-  #
-  # Two separate metric series:
-  #   http.requests.successful
-  #   http.requests.failed
-  #
-  # Both produce delta Sum increments.
-  # The deltatocumulative processor accumulates these later.
-  #
-  # host.name is retained as the resource dimension.
-  # service.name and URL path are deliberately excluded
-  # to avoid splitting the aggregate counts by service/path.
+  # 1. AGGREGATE HTTP REQUEST METRICS (FROM LOGS)
   # ==========================================================
 
   signal_to_metrics/aggregate:
@@ -118,11 +102,7 @@ connectors:
 
     logs:
 
-      # ------------------------------------------------------
-      # SUCCESSFUL HTTP REQUESTS
-      # Status code < 400
-      # ------------------------------------------------------
-
+      # Successful HTTP requests
       - name: http.requests.successful
         description: Total successful HTTP requests
         unit: "{request}"
@@ -130,19 +110,14 @@ connectors:
         conditions:
           - 'log.attributes["http.response.status_code"] != nil and log.attributes["http.response.status_code"] < 400'
 
-        include_resource_attributes:
-          - key: host.name
+        #include_resource_attributes:
+        #  - key: host.name
 
         sum:
           value: "1"
           monotonic: true
 
-
-      # ------------------------------------------------------
-      # FAILED HTTP REQUESTS
-      # Status code >= 400
-      # ------------------------------------------------------
-
+      # Failed HTTP requests
       - name: http.requests.failed
         description: Total failed HTTP requests
         unit: "{request}"
@@ -150,8 +125,8 @@ connectors:
         conditions:
           - 'log.attributes["http.response.status_code"] != nil and log.attributes["http.response.status_code"] >= 400'
 
-        include_resource_attributes:
-          - key: host.name
+        #include_resource_attributes:
+        #  - key: host.name
 
         sum:
           value: "1"
@@ -159,16 +134,7 @@ connectors:
 
 
   # ==========================================================
-  # 2. DETAILED HTTP REQUEST METRICS
-  # ==========================================================
-  #
-  # Keeps individual request dimensions:
-  #   - service.name
-  #   - url.path
-  #   - http.response.status_code
-  #   - app.operation (optional)
-  #
-  # This metric is NOT passed through the cumulative processor.
+  # 2. DETAILED HTTP REQUEST METRICS (FROM LOGS)
   # ==========================================================
 
   signal_to_metrics/detailed:
@@ -191,11 +157,54 @@ connectors:
           - key: app.operation
             optional: true
 
-        include_resource_attributes:
-          - key: service.name
+        #include_resource_attributes:
+        #  - key: service.name
 
         sum:
           value: "1"
+          monotonic: true
+
+
+  # ==========================================================
+  # 3. HTTP TRACE-TO-METRICS CONVERSION
+  # ==========================================================
+  #
+  # Input: Individual spans
+  #
+  # Output metric:
+  #   app.http.trace.requests
+  #
+  # Metric dimensions:
+  #   - http.response.status_code
+  #   - http.request.method (optional)
+  #
+  # Each span contributes its adjusted count.
+  # Output temporality: DELTA
+  # ==========================================================
+
+  signal_to_metrics/traces:
+    error_mode: ignore
+
+    spans:
+
+      - name: app.http.trace.requests
+        description: Count HTTP requests by response status code and method
+        unit: "{request}"
+
+        # Only process spans containing an HTTP response status code.
+        conditions:
+          - 'span.attributes["http.response.status_code"] != nil'
+
+        # Categorise metrics by HTTP status code and method.
+        attributes:
+          - key: http.response.status_code
+
+          - key: http.request.method
+            optional: true
+
+        # Generate a monotonic Sum metric.
+        sum:
+          value: "Int(AdjustedCount())"
           monotonic: true
 
 
@@ -227,6 +236,7 @@ service:
         - debug
         - otlp_grpc/jaeger
         - span_metrics
+        - signal_to_metrics/traces
         - elasticsearch
 
 
@@ -246,6 +256,7 @@ service:
         - postgresql
         - prometheus/ad
         - span_metrics
+        - signal_to_metrics/traces
 
       processors:
         - resource_detection
@@ -273,6 +284,7 @@ service:
         - postgresql
         - prometheus/ad
         - span_metrics
+        - signal_to_metrics/traces
 
       processors:
         - resource_detection
@@ -286,11 +298,6 @@ service:
 
     # ========================================================
     # CUMULATIVE LOG-DERIVED METRICS
-    # ========================================================
-    #
-    # Receives aggregate metrics from signal_to_metrics.
-    # Converts their delta Sum values into cumulative values.
-    # Exports to both Elasticsearch and Prometheus.
     # ========================================================
 
     metrics/log-derived:
@@ -310,10 +317,6 @@ service:
 
     # ========================================================
     # DETAILED LOG-DERIVED METRICS
-    # ========================================================
-    #
-    # Preserves the individual request dimensions.
-    # Does not use deltatocumulative.
     # ========================================================
 
     metrics/log-derived/detailed:
