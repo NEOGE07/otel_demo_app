@@ -5,7 +5,7 @@
 
 exporters:
 
-  # Primary observability backend
+  # Primary observability backend: Elasticsearch
   elasticsearch:
     endpoint: http://elasticsearch:9200
     timeout: 30s
@@ -21,7 +21,7 @@ exporters:
       max_interval: 30s
       max_elapsed_time: 300s
 
-  # Jaeger - secondary trace backend
+  # Jaeger trace exporter
   otlp_grpc/jaeger:
     endpoint: jaeger:4317
     tls:
@@ -30,13 +30,13 @@ exporters:
     sending_queue:
       enabled: true
 
-  # Prometheus OTLP HTTP receiver
+  # Prometheus metrics exporter
   otlp_http/prometheus:
     endpoint: http://prometheus:9090/api/v1/otlp
     tls:
       insecure: true
 
-  # OpenSearch - optional secondary log backend
+  # OpenSearch log exporter
   opensearch:
     logs_index: otel-logs
     logs_index_time_format: "yyyy-MM-dd"
@@ -53,24 +53,32 @@ exporters:
 
 processors:
 
-  # Resource and memory management
+  # Memory protection
   memory_limiter:
     check_interval: 1s
     limit_percentage: 80
     spike_limit_percentage: 25
 
-  # Convert cumulative histograms into delta histograms.
-  # Required for Elasticsearch exporter compatibility.
-  #
-  # Only histograms and exponential histograms are converted.
-  # Cumulative sums are left unchanged.
+  # Existing cumulative-to-delta processor
+  # Only applies to histograms and exponential histograms.
   cumulative_to_delta:
     include:
       metric_types:
         - histogram
         - exponentialhistogram
 
-  # Copy service.name from metric resource attributes
+  # Delta-to-cumulative processor
+  # Accumulates incoming delta Sum metrics in memory.
+  #
+  # max_stale: Retain inactive metric streams for up to 10 years.
+  # max_streams: Limit the number of tracked metric streams.
+  #
+  # NOTE: State is lost when the Collector restarts.
+  deltatocumulative:
+    max_stale: 87600h
+    max_streams: 100
+
+  # Copy service.name from resource attributes
   # into metric datapoint attributes.
   transform/add_service_name_to_metrics:
     metric_statements:
@@ -78,7 +86,6 @@ processors:
         statements:
           - set(attributes["service.name"], resource.attributes["service.name"]) where resource.attributes["service.name"] != nil
 
-      # Remove service.name from resource attributes
       - context: resource
         statements:
           - delete_key(attributes, "service.name")
@@ -90,24 +97,95 @@ processors:
 
 connectors:
 
-  # ----------------------------------------------------------
-  # LOGS -> METRICS
-  # ----------------------------------------------------------
+  # ==========================================================
+  # 1. AGGREGATE HTTP REQUEST METRICS
+  # ==========================================================
+  #
+  # Two separate metric series:
+  #   http.requests.successful
+  #   http.requests.failed
+  #
+  # Both produce delta Sum increments.
+  # The deltatocumulative processor accumulates these later.
+  #
+  # host.name is retained as the resource dimension.
+  # service.name and URL path are deliberately excluded
+  # to avoid splitting the aggregate counts by service/path.
+  # ==========================================================
 
-  signal_to_metrics:
+  signal_to_metrics/aggregate:
     error_mode: ignore
 
     logs:
-      - name: app.http.requests
-        description: "Count HTTP requests by service and status code"
+
+      # ------------------------------------------------------
+      # SUCCESSFUL HTTP REQUESTS
+      # Status code < 400
+      # ------------------------------------------------------
+
+      - name: http.requests.successful
+        description: Total successful HTTP requests
         unit: "{request}"
 
-        # Specifies the conditions of logs to perform conversion
+        conditions:
+          - 'log.attributes["http.response.status_code"] != nil and log.attributes["http.response.status_code"] < 400'
+
+        include_resource_attributes:
+          - key: host.name
+
+        sum:
+          value: "1"
+          monotonic: true
+
+
+      # ------------------------------------------------------
+      # FAILED HTTP REQUESTS
+      # Status code >= 400
+      # ------------------------------------------------------
+
+      - name: http.requests.failed
+        description: Total failed HTTP requests
+        unit: "{request}"
+
+        conditions:
+          - 'log.attributes["http.response.status_code"] != nil and log.attributes["http.response.status_code"] >= 400'
+
+        include_resource_attributes:
+          - key: host.name
+
+        sum:
+          value: "1"
+          monotonic: true
+
+
+  # ==========================================================
+  # 2. DETAILED HTTP REQUEST METRICS
+  # ==========================================================
+  #
+  # Keeps individual request dimensions:
+  #   - service.name
+  #   - url.path
+  #   - http.response.status_code
+  #   - app.operation (optional)
+  #
+  # This metric is NOT passed through the cumulative processor.
+  # ==========================================================
+
+  signal_to_metrics/detailed:
+    error_mode: ignore
+
+    logs:
+
+      - name: app.http.requests
+        description: Count HTTP requests by service, URL path and status code
+        unit: "{request}"
+
         conditions:
           - 'log.attributes["http.response.status_code"] != nil and resource.attributes["service.name"] != nil'
 
-        # Specifies attributes to perform conversion on
         attributes:
+          - key: url.path
+
           - key: http.response.status_code
 
           - key: app.operation
@@ -126,11 +204,12 @@ connectors:
 # ============================================================
 
 service:
+
   pipelines:
 
-    # --------------------------------------------------------
-    # TRACES
-    # --------------------------------------------------------
+    # ========================================================
+    # TRACES PIPELINE
+    # ========================================================
 
     traces:
       receivers:
@@ -151,10 +230,10 @@ service:
         - elasticsearch
 
 
-    # --------------------------------------------------------
-    # METRICS -> PROMETHEUS
-    # Original metric temporality preserved
-    # --------------------------------------------------------
+    # ========================================================
+    # ORIGINAL METRICS PIPELINE
+    # PROMETHEUS
+    # ========================================================
 
     metrics:
       receivers:
@@ -178,10 +257,10 @@ service:
         - otlp_http/prometheus
 
 
-    # --------------------------------------------------------
-    # METRICS -> ELASTICSEARCH
-    # Cumulative histograms -> Delta histograms
-    # --------------------------------------------------------
+    # ========================================================
+    # ORIGINAL METRICS PIPELINE
+    # ELASTICSEARCH
+    # ========================================================
 
     metrics/elasticsearch:
       receivers:
@@ -205,13 +284,41 @@ service:
         - elasticsearch
 
 
-    # --------------------------------------------------------
-    # LOG-DERIVED METRICS -> PROMETHEUS
-    # --------------------------------------------------------
+    # ========================================================
+    # CUMULATIVE LOG-DERIVED METRICS
+    # ========================================================
+    #
+    # Receives aggregate metrics from signal_to_metrics.
+    # Converts their delta Sum values into cumulative values.
+    # Exports to both Elasticsearch and Prometheus.
+    # ========================================================
 
     metrics/log-derived:
       receivers:
-        - signal_to_metrics
+        - signal_to_metrics/aggregate
+
+      processors:
+        - resource_detection
+        - memory_limiter
+        - deltatocumulative
+
+      exporters:
+        - debug
+        - otlp_http/prometheus
+        - elasticsearch
+
+
+    # ========================================================
+    # DETAILED LOG-DERIVED METRICS
+    # ========================================================
+    #
+    # Preserves the individual request dimensions.
+    # Does not use deltatocumulative.
+    # ========================================================
+
+    metrics/log-derived/detailed:
+      receivers:
+        - signal_to_metrics/detailed
 
       processors:
         - resource_detection
@@ -221,30 +328,12 @@ service:
       exporters:
         - debug
         - otlp_http/prometheus
-
-
-    # --------------------------------------------------------
-    # LOG-DERIVED METRICS -> ELASTICSEARCH
-    # Delta Sum generated by signal_to_metrics
-    # No cumulative-to-delta conversion required
-    # --------------------------------------------------------
-
-    metrics/log-derived/elasticsearch:
-      receivers:
-        - signal_to_metrics
-
-      processors:
-        - resource_detection
-        - memory_limiter
-        - transform/add_service_name_to_metrics
-
-      exporters:
         - elasticsearch
 
 
-    # --------------------------------------------------------
-    # LOGS
-    # --------------------------------------------------------
+    # ========================================================
+    # LOGS PIPELINE
+    # ========================================================
 
     logs:
       receivers:
@@ -260,5 +349,6 @@ service:
         - debug
         - opensearch
         - elasticsearch
-        - signal_to_metrics
+        - signal_to_metrics/aggregate
+        - signal_to_metrics/detailed
 
