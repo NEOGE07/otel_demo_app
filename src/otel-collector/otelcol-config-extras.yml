@@ -5,7 +5,11 @@
 
 exporters:
 
-  # Primary observability backend: Elasticsearch
+  # ==========================================================
+  # EXISTING GENERAL ELASTICSEARCH EXPORTER
+  # Used by metrics and existing log-derived metrics.
+  # ==========================================================
+
   elasticsearch:
     endpoint: http://elasticsearch:9200
     timeout: 30s
@@ -21,7 +25,57 @@ exporters:
       max_interval: 30s
       max_elapsed_time: 300s
 
-  # Jaeger trace exporter
+
+  # ==========================================================
+  # BEFORE SAMPLING ELASTICSEARCH EXPORTER
+  # Receives traces before tail_sampling.
+  # ==========================================================
+
+  elasticsearch/before:
+    endpoint: http://elasticsearch:9200
+    timeout: 30s
+
+    traces_index: traces-before.otel-default
+
+    sending_queue:
+      enabled: true
+      num_consumers: 10
+      queue_size: 1000
+
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 30s
+      max_elapsed_time: 300s
+
+
+  # ==========================================================
+  # AFTER SAMPLING ELASTICSEARCH EXPORTER
+  # Receives only traces retained by tail_sampling.
+  # ==========================================================
+
+  elasticsearch/after:
+    endpoint: http://elasticsearch:9200
+    timeout: 30s
+
+    traces_index: traces-after.otel-default
+
+    sending_queue:
+      enabled: true
+      num_consumers: 10
+      queue_size: 1000
+
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 30s
+      max_elapsed_time: 300s
+
+
+  # ==========================================================
+  # JAEGER TRACE EXPORTER
+  # ==========================================================
+
   otlp_grpc/jaeger:
     endpoint: jaeger:4317
     tls:
@@ -30,13 +84,21 @@ exporters:
     sending_queue:
       enabled: true
 
-  # Prometheus metrics exporter
+
+  # ==========================================================
+  # PROMETHEUS METRICS EXPORTER
+  # ==========================================================
+
   otlp_http/prometheus:
     endpoint: http://prometheus:9090/api/v1/otlp
     tls:
       insecure: true
 
-  # OpenSearch log exporter
+
+  # ==========================================================
+  # OPENSEARCH LOG EXPORTER
+  # ==========================================================
+
   opensearch:
     logs_index: otel-logs
     logs_index_time_format: "yyyy-MM-dd"
@@ -53,29 +115,75 @@ exporters:
 
 processors:
 
-  # Memory protection
+  # ==========================================================
+  # MEMORY PROTECTION
+  # ==========================================================
+
   memory_limiter:
     check_interval: 1s
     limit_percentage: 80
     spike_limit_percentage: 25
 
-  # Existing cumulative-to-delta processor
-  # Only applies to histograms and exponential histograms.
+
+  # ==========================================================
+  # TRADITIONAL TAIL-BASED SAMPLING
+  # Only used by the AFTER sampling pipeline.
+  # ==========================================================
+
+  tail_sampling:
+    decision_wait: 10s
+
+    num_traces: 10000
+
+    expected_new_traces_per_sec: 100
+
+    policies:
+
+      # Policy 1: Retain all traces containing errors
+      - name: keep-error-traces
+        type: status_code
+        status_code:
+          status_codes:
+            - ERROR
+
+      # Policy 2: Retain traces exceeding 1 second
+      - name: keep-slow-traces
+        type: latency
+        latency:
+          threshold_ms: 1000
+
+      # Policy 3: Retain approximately 10% of
+      # traces that do not match the other policies
+      - name: sample-normal-traces
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 10
+
+
+  # ==========================================================
+  # CUMULATIVE-TO-DELTA PROCESSOR
+  # ==========================================================
+
   cumulative_to_delta:
     include:
       metric_types:
         - histogram
         - exponentialhistogram
 
-  # Delta-to-cumulative processor
-  # Accumulates incoming delta Sum metrics in memory.
-  # State is lost when the Collector restarts.
+
+  # ==========================================================
+  # DELTA-TO-CUMULATIVE PROCESSOR
+  # ==========================================================
+
   deltatocumulative:
     max_stale: 87600h
     max_streams: 100
 
-  # Copy service.name from resource attributes
-  # into metric datapoint attributes.
+
+  # ==========================================================
+  # COPY SERVICE.NAME FROM RESOURCE TO METRIC DATAPOINTS
+  # ==========================================================
+
   transform/add_service_name_to_metrics:
     metric_statements:
       - context: datapoint
@@ -110,9 +218,6 @@ connectors:
         conditions:
           - 'log.attributes["http.response.status_code"] != nil and log.attributes["http.response.status_code"] < 400'
 
-        #include_resource_attributes:
-        #  - key: host.name
-
         sum:
           value: "1"
           monotonic: true
@@ -124,9 +229,6 @@ connectors:
 
         conditions:
           - 'log.attributes["http.response.status_code"] != nil and log.attributes["http.response.status_code"] >= 400'
-
-        #include_resource_attributes:
-        #  - key: host.name
 
         sum:
           value: "1"
@@ -157,9 +259,6 @@ connectors:
           - key: app.operation
             optional: true
 
-        #include_resource_attributes:
-        #  - key: service.name
-
         sum:
           value: "1"
           monotonic: true
@@ -167,19 +266,6 @@ connectors:
 
   # ==========================================================
   # 3. HTTP TRACE-TO-METRICS CONVERSION
-  # ==========================================================
-  #
-  # Input: Individual spans
-  #
-  # Output metric:
-  #   app.http.trace.requests
-  #
-  # Metric dimensions:
-  #   - http.response.status_code
-  #   - http.request.method (optional)
-  #
-  # Each span contributes its adjusted count.
-  # Output temporality: DELTA
   # ==========================================================
 
   signal_to_metrics/traces:
@@ -191,18 +277,15 @@ connectors:
         description: Count HTTP requests by response status code and method
         unit: "{request}"
 
-        # Only process spans containing an HTTP response status code.
         conditions:
           - 'span.attributes["http.response.status_code"] != nil'
 
-        # Categorise metrics by HTTP status code and method.
         attributes:
           - key: http.response.status_code
 
           - key: http.request.method
             optional: true
 
-        # Generate a monotonic Sum metric.
         sum:
           value: "Int(AdjustedCount())"
           monotonic: true
@@ -217,7 +300,34 @@ service:
   pipelines:
 
     # ========================================================
-    # TRACES PIPELINE
+    # TRACES BEFORE SAMPLING
+    #
+    # Receives a copy of incoming traces.
+    # Runs the common enrichment and redaction processors.
+    # Does NOT execute tail_sampling.
+    # ========================================================
+
+    traces/before:
+      receivers:
+        - otlp
+
+      processors:
+        - resource_detection
+        - memory_limiter
+        - transform/sanitize_spans
+        - gen_ai_normalizer
+        - transform/redact_sensitive_data
+        - redaction
+
+      exporters:
+        - elasticsearch/before
+
+
+    # ========================================================
+    # TRACES AFTER SAMPLING
+    #
+    # Existing trace pipeline.
+    # Executes tail_sampling before exporting.
     # ========================================================
 
     traces:
@@ -231,6 +341,7 @@ service:
         - gen_ai_normalizer
         - transform/redact_sensitive_data
         - redaction
+        - tail_sampling
 
       exporters:
         - debug
@@ -238,6 +349,7 @@ service:
         - span_metrics
         - signal_to_metrics/traces
         - elasticsearch
+        - elasticsearch/after
 
 
     # ========================================================
