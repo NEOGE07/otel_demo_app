@@ -6,6 +6,7 @@ exporters:
 
   # ==========================================================
   # EXISTING GENERAL ELASTICSEARCH EXPORTER
+  # Used by metrics and existing log-derived metrics.
   # ==========================================================
 
   elasticsearch:
@@ -26,6 +27,7 @@ exporters:
 
   # ==========================================================
   # BEFORE SAMPLING ELASTICSEARCH EXPORTER
+  # Receives traces before tail_sampling.
   # ==========================================================
 
   elasticsearch/before:
@@ -48,6 +50,7 @@ exporters:
 
   # ==========================================================
   # AFTER SAMPLING ELASTICSEARCH EXPORTER
+  # Receives only traces retained by tail_sampling.
   # ==========================================================
 
   elasticsearch/after:
@@ -66,6 +69,30 @@ exporters:
       initial_interval: 1s
       max_interval: 30s
       max_elapsed_time: 300s
+
+
+  # ==========================================================
+  # ADAPTIVE SAMPLING ELASTICSEARCH EXPORTER
+  # DISABLED FOR NOW
+  # Intended to receive traces retained by adaptive sampling.
+  # ==========================================================
+
+  # elasticsearch/adaptive:
+  #   endpoint: http://elasticsearch:9200
+  #   timeout: 30s
+  #
+  #   traces_index: traces-adaptive.otel-default
+  #
+  #   sending_queue:
+  #     enabled: true
+  #     num_consumers: 10
+  #     queue_size: 1000
+  #
+  #   retry_on_failure:
+  #     enabled: true
+  #     initial_interval: 1s
+  #     max_interval: 30s
+  #     max_elapsed_time: 300s
 
 
   # ==========================================================
@@ -157,8 +184,48 @@ processors:
 
 
   # ==========================================================
-  # CUMULATIVE-TO-DELTA PROCESSOR
-  # TEMPORARILY DISABLED FOR TESTING
+  # ADAPTIVE TAIL SAMPLING
+  # DISABLED FOR NOW
+  # This processor is not available in Collector 0.160.0.
+  # ==========================================================
+
+  # adaptive_tail_sampling:
+  #   trace_timeout: 30s
+  #   decision_delay: 2s
+  #
+  #   num_traces: 10000
+  #   span_limit: 10000
+  #
+  #   decision_cache:
+  #     sampled_cache_size: 10000
+  #     non_sampled_cache_size: 10000
+  #
+  #   rules:
+  #
+  #     # Rule 1: Retain traces containing errors
+  #     - name: keep-errors
+  #       conditions:
+  #         - span.status.code == STATUS_CODE_ERROR
+  #       sampler:
+  #         type: always_sample
+  #
+  #     # Rule 2: Adaptively sample normal traces
+  #     - name: adaptive-default
+  #       sampler:
+  #         type: adaptive_percentage
+  #         goal_percentage: 10
+  #
+  #         fingerprint_attributes:
+  #           - resource.attributes["service.name"]
+  #           - span.attributes["http.route"]
+  #
+  #         adjustment_interval: 15s
+  #         weight: 0.5
+  #         max_keys: 500
+
+
+  # ==========================================================
+  # CUMULATIVE-TO-DELTA PROCESSOR (DISABLED FOR TESTING)
   # ==========================================================
 
   # cumulative_to_delta:
@@ -171,7 +238,7 @@ processors:
   # ==========================================================
   # DELTA-TO-CUMULATIVE PROCESSOR
   # ==========================================================
-  # For aggregation of metrics
+
   deltatocumulative:
     max_stale: 87600h
     max_streams: 100
@@ -181,7 +248,6 @@ processors:
   # COPY SERVICE.NAME FROM RESOURCE TO METRIC DATAPOINTS
   # ==========================================================
 
-  # Adding service.name to datapoint rather than keeping at Resource attributes
   transform/add_service_name_to_metrics:
     metric_statements:
       - context: datapoint
@@ -351,6 +417,32 @@ service:
 
 
     # ========================================================
+    # ADAPTIVE SAMPLING TRACE PIPELINE
+    # DISABLED FOR NOW
+    #
+    # Receives its own copy of incoming OTLP traces.
+    # Uses the same preprocessing as the other trace pipelines.
+    # Would execute adaptive_tail_sampling independently.
+    # ========================================================
+
+    # traces/adaptive:
+    #   receivers:
+    #     - otlp
+    #
+    #   processors:
+    #     - resource_detection
+    #     - memory_limiter
+    #     - transform/sanitize_spans
+    #     - gen_ai_normalizer
+    #     - transform/redact_sensitive_data
+    #     - redaction
+    #     - adaptive_tail_sampling
+    #
+    #   exporters:
+    #     - elasticsearch/adaptive
+
+
+    # ========================================================
     # ORIGINAL METRICS PIPELINE
     # PROMETHEUS
     # ========================================================
@@ -399,7 +491,7 @@ service:
       processors:
         - resource_detection
         - memory_limiter
-        # - cumulative_to_delta
+        # - cumulative_to_delta  # Disabled for testing
         - transform/add_service_name_to_metrics
 
       exporters:
