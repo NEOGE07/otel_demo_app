@@ -1,4 +1,3 @@
-
 # ============================================================
 # EXPORTERS
 # ============================================================
@@ -7,7 +6,6 @@ exporters:
 
   # ==========================================================
   # EXISTING GENERAL ELASTICSEARCH EXPORTER
-  # Used by metrics and existing log-derived metrics.
   # ==========================================================
 
   elasticsearch:
@@ -28,7 +26,6 @@ exporters:
 
   # ==========================================================
   # BEFORE SAMPLING ELASTICSEARCH EXPORTER
-  # Receives traces before tail_sampling.
   # ==========================================================
 
   elasticsearch/before:
@@ -51,7 +48,6 @@ exporters:
 
   # ==========================================================
   # AFTER SAMPLING ELASTICSEARCH EXPORTER
-  # Receives only traces retained by tail_sampling.
   # ==========================================================
 
   elasticsearch/after:
@@ -162,13 +158,14 @@ processors:
 
   # ==========================================================
   # CUMULATIVE-TO-DELTA PROCESSOR
+  # TEMPORARILY DISABLED FOR TESTING
   # ==========================================================
 
-  cumulative_to_delta:
-    include:
-      metric_types:
-        - histogram
-        - exponentialhistogram
+  # cumulative_to_delta:
+  #   include:
+  #     metric_types:
+  #       - histogram
+  #       - exponentialhistogram
 
 
   # ==========================================================
@@ -401,7 +398,7 @@ service:
       processors:
         - resource_detection
         - memory_limiter
-        - cumulative_to_delta
+        # - cumulative_to_delta
         - transform/add_service_name_to_metrics
 
       exporters:
@@ -466,4 +463,3 @@ service:
         - elasticsearch
         - signal_to_metrics/aggregate
         - signal_to_metrics/detailed
-
