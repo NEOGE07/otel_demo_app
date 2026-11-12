@@ -171,7 +171,7 @@ processors:
   # ==========================================================
   # DELTA-TO-CUMULATIVE PROCESSOR
   # ==========================================================
-
+  # For aggregation of metrics
   deltatocumulative:
     max_stale: 87600h
     max_streams: 100
@@ -181,6 +181,7 @@ processors:
   # COPY SERVICE.NAME FROM RESOURCE TO METRIC DATAPOINTS
   # ==========================================================
 
+  # Adding service.name to datapoint rather than keeping at Resource attributes
   transform/add_service_name_to_metrics:
     metric_statements:
       - context: datapoint
