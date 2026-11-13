@@ -153,6 +153,13 @@ processors:
   # Only used by the AFTER sampling pipeline.
   # ==========================================================
 
+
+  # https://www.elastic.co/docs/solutions/observability/apm/discover-traces
+  # tidy up traditional version first. KIV adaptive version (could possibly use GCC)
+  
+  # Elastic has retention policy --> can split data 
+  # E.g. before traces 3 days, after traces SOP 30 day
+  
   tail_sampling:
     decision_wait: 10s
 
@@ -281,6 +288,10 @@ connectors:
 
         conditions:
           - 'log.attributes["http.response.status_code"] != nil and log.attributes["http.response.status_code"] < 400'
+        
+        attributes:
+          - key: app.metric_source
+            default_value: logs_aggregate_success
 
         sum:
           value: "1"
@@ -294,6 +305,10 @@ connectors:
         conditions:
           - 'log.attributes["http.response.status_code"] != nil and log.attributes["http.response.status_code"] >= 400'
 
+        attributes:
+          - key: app.metric_source
+            default_value: logs_aggregate_fail
+        
         sum:
           value: "1"
           monotonic: true
@@ -302,6 +317,8 @@ connectors:
   # ==========================================================
   # 2. DETAILED HTTP REQUEST METRICS (FROM LOGS)
   # ==========================================================
+
+  # Add "from logs"
 
   signal_to_metrics/detailed:
     error_mode: ignore
@@ -319,6 +336,9 @@ connectors:
           - key: url.path
 
           - key: http.response.status_code
+          
+          - key: app.metric_source
+            default_value: logs
 
           - key: app.operation
             optional: true
@@ -346,6 +366,9 @@ connectors:
 
         attributes:
           - key: http.response.status_code
+          
+          - key: app.metric_source
+            default_value: traces
 
           - key: http.request.method
             optional: true
